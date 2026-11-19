@@ -1,9 +1,9 @@
-# kanAV-soeasy
+# javmeta
 
 > 一条命令把**番号**变成**媒体库里能播的成品**：探源 → 下载 → 刮削 → 入库。
 > 中文 | [English](#english)
 >
-> 仓库叫 `kanAV-soeasy`，**包名和命令仍是 `javpipe`**（`pip install -e .` 之后跑
+> 仓库叫 `javmeta`，**包名和命令仍是 `javpipe`**（`pip install -e .` 之后跑
 > `javpipe run SSIS-885`）。改的只是仓库名，代码和用法一行没变。
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
