@@ -244,6 +244,22 @@ A：封面下载失败（图床抽风）不影响入库。跑 `javpipe rescue` �
 A：不会。进 `<failed_root>/<番号>/`，片子完整，只是元数据没拿到。`javpipe rescue`
 会一直尝试，3 次不过写 `.skip` 标记不再骚扰站点。
 
+**Q：明明入库了，为什么磁盘上还多留一份、库里甚至出现 `CODE_1.mp4`？**
+A：两个都要防的坑，根源都是「凭返回值下结论」：
+
+1. **拷贝返回非 0 ≠ 没拷贝成功。** 走网络/中转的搬运常常是「字节全写完了，收尾那步才报错」，
+   于是脚本记成失败、源文件不敢删，而库里其实已经有一份完整的 —— 一份片占两份空间。
+   正确做法：**搬完按字节核对目标文件**，大小一致就按成功处理，同时把暂存件清掉。
+2. **很多文件工具不覆盖同名文件，而是悄悄改名成 `CODE_1.mp4`。** 重跑同一个番号时，
+   库里就会出现两份，刮削后一起进媒体库。搬之前先删旧件，或搬完按「同番号 + 同字节」
+   收敛成一份。
+
+**Q：网速明明够，搬运却随机失败，日志里是 `failed to call HTTP proxy` / 本机地址超时？**
+A：下载代理（`http_proxy`）是**全进程环境变量**，你调用的本机 CLI（挂载工具、NAS 管理接口、
+容器内的 qB API）都会继承它。让 NAS/本机流量绕一圈代理，大文件传输就会在尾部被切断。
+两个动作：给局域网点直连 —— `no_proxy=127.0.0.1,localhost,<NAS_IP>,192.168.0.0/16`；
+以及**调本机 CLI 前把代理变量整个剥掉**，只在真正出网的请求上带代理。
+
 ## 免责声明
 
 本项目只提供**技术实现**，不含任何内容、索引或资源。使用者需自行确保其行为符合所在地
@@ -264,6 +280,12 @@ finds a source, downloads it, scrapes metadata, and files it into a Jellyfin-rea
   retried by `javpipe rescue`.
 - Multipart-torrent protection: several >1GB files are treated as parts of one title, not as
   junk to delete.
+- Copy verification: every move/copy is confirmed by **byte size at the destination** — a
+  non-zero exit code does not mean the file failed to land, and many tools rename on collision
+  (`CODE_1.mp4`) instead of overwriting, which silently doubles your storage.
+- Proxy hygiene: the download proxy is stripped from every local/NAS CLI call
+  (`no_proxy=…,<NAS_IP>,192.168.0.0/16`); routing local traffic through the proxy cuts large
+  transfers off at the tail.
 - Everything machine-specific (paths, proxy, passwords) lives in `config.yaml` / env vars.
 
 ```bash

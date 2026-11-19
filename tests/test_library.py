@@ -154,3 +154,39 @@ def test_unpack_js_eval_bad_input():
 def test_norm():
     assert norm("ssis-885") == "SSIS885"
     assert norm("") == ""
+
+# ── 落库：搬完必须按字节对账 ──────────────────────────────────────────
+def _mk_folder(cfg, code, nbytes):
+    cfg["library"]["ad_max_bytes"] = 512
+    cfg["library"]["multipart_min_bytes"] = 512 * 1024 * 1024
+    d = Path(cfg["download_root"]) / code
+    d.mkdir(parents=True)
+    (d / f"hhd800.com@{code}.mp4").write_bytes(b"0" * nbytes)
+    return d
+
+
+def test_ingest_moves(cfg):
+    from javpipe.library import ingest
+    d = _mk_folder(cfg, "ABC-123", 4096)
+    state, target = ingest(cfg, str(d), "ABC-123", log=lambda *a, **k: None)
+    assert state == "moved"
+    assert (Path(target) / "ABC-123.mp4").stat().st_size == 4096
+    assert "ABC-123" in load_ledger(cfg)["processed"]
+    assert not d.exists()
+
+
+def test_ingest_catches_incomplete_move(cfg, monkeypatch):
+    """搬运"报成功"但字节没到位（断流/截断）：必须判 verify-fail，且不能记台账。"""
+    from javpipe import library
+    d = _mk_folder(cfg, "ABC-124", 4096)
+
+    def fake_move(src, dst):
+        dst = Path(dst)
+        dst.mkdir(parents=True, exist_ok=True)
+        (dst / "ABC-124.mp4").write_bytes(b"0" * 1024)   # 只到了一部分
+        return str(dst)
+
+    monkeypatch.setattr(library.shutil, "move", fake_move)
+    state, _target = library.ingest(cfg, str(d), "ABC-124", log=lambda *a, **k: None)
+    assert state == "verify-fail"
+    assert "ABC-124" not in library.load_ledger(cfg)["processed"]

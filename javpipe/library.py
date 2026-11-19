@@ -241,7 +241,15 @@ def ingest(cfg: dict, folder: str, code: str, *, meta: dict | None = None,
         return "exists", str(target)
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    before = {os.path.basename(f): sz for f, sz in find_videos(str(folder_p))}
     shutil.move(str(folder_p), str(target))
+    # 搬完按字节对账：跨盘/跨网络的搬运有"报成功却没搬全"的，一律以目标端实到字节为准，
+    # 对不上就不记台账（下次 rescue 还能再来一次），绝不静默当成成功。
+    after = {os.path.basename(f): sz for f, sz in find_videos(str(target))}
+    bad = [(n, sz, after.get(n)) for n, sz in before.items() if after.get(n) != sz]
+    if bad:
+        log(f"    ⚠️ 落库未通过校验 {bad[:3]}（已在 {target}，未记台账）")
+        return "verify-fail", str(target)
     mark_processed(cfg, code)
     return "moved", str(target)
 
