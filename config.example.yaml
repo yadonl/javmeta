@@ -1,0 +1,51 @@
+# javpipe 配置示例：复制成 config.yaml 再改
+# 所有路径支持 ~ 展开；密码也可以用环境变量 JAVPIPE_QB_PASSWORD 传
+
+download_root: ~/downloads/jav        # 磁力/流媒体落盘（qB 的 save_path 指向这里）
+failed_root: ~/downloads/jav-failed   # 刮削失败的隔离区
+library_root: ~/media/jav             # 成品库，Jellyfin/Emby 指向这里
+
+proxy: ""                             # 例: http://127.0.0.1:7890；境外站点基本都需要
+language: zh                          # MissAV 用 zh（繁体）
+
+qbittorrent:
+  url: http://127.0.0.1:8080
+  username: admin
+  password: ""                        # 别写进 git，用 JAVPIPE_QB_PASSWORD
+  category: javpipe
+
+sources:
+  bitmagnet: ""                       # 磁力索网关 GraphQL，留空=只用流媒体
+  min_seeders: 2
+  missav: true
+  jable: true
+
+download:
+  stall_window: 180                   # 连续多少秒低于 min_kbps 就弃磁力
+  min_kbps: 200
+  magnet_timeout: 1800
+  segment_workers: 8                  # HLS 分片并发
+  segment_retries: 5
+  poll_interval: 20
+
+scraper:
+  javbus_mirrors:
+    - https://www.javbus.com
+    - https://www.javseen.com
+  fallback: [missav, jable]           # JavBus 缺页时用它们补元数据
+  cover_timeout: 40
+
+library:
+  # 从上往下匹配，命中即停；"*" 是默认兜底
+  rules:
+    - dir: 无码
+      match: ["-U", "-UNCENSORED", "UNCENSORED-LEAK", 无码, 無碼]
+    - dir: 有码/有字幕
+      match: ["-C", "CHINESE-SUBTITLE", 中文字幕, 字幕]
+    - dir: 有码/4K
+      match: [4K, 2160P, UHD]
+    - dir: 有码/无字幕
+      match: ["*"]
+  video_name: "{code}.mp4"
+  multipart_min_bytes: 1073741824     # 多段种子：每段都大于 1GB 就全保留
+  ad_max_bytes: 52428800              # 小于 50MB 的"视频"当广告删掉

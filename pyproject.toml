@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "javpipe"
+version = "0.1.0"
+description = "番号 → 下载 → 刮削 → 媒体库 的一条龙流水线（qBittorrent + MissAV/Jable + JavBus/NFO + Jellyfin）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "yadonl" }]
+keywords = ["media", "nas", "jellyfin", "nfo", "qbittorrent", "hls", "automation"]
+dependencies = [
+    "curl_cffi>=0.6",
+    "beautifulsoup4>=4.12",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+javpipe = "javpipe.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yadonl/javpipe"
+Issues = "https://github.com/yadonl/javpipe/issues"
+
+[tool.setuptools.packages.find]
+include = ["javpipe*"]
