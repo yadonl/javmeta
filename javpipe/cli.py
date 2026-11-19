@@ -100,6 +100,33 @@ def cmd_doctor(args, cfg, scraper):
     return doctor(cfg, scraper)
 
 
+def cmd_serve(args, cfg, scraper):
+    from .serve import serve
+    serve(cfg, host=args.host, port=args.port, site=args.site)
+    return 0
+
+
+def cmd_worker(args, cfg, scraper):
+    from .worker import run_loop, run_once
+    if args.once:
+        r = run_once(cfg, scraper, dry_run=args.dry_run, force=args.force)
+        print(f"处理结果: {r}" if r else "队列里没有待办")
+        return 0 if (r or {}).get("status") != "failed" else 1
+    done = run_loop(cfg, scraper, max_items=args.max_items, interval=args.interval,
+                    dry_run=args.dry_run, force=args.force)
+    ok = sum(1 for r in done if r.get("status") in ("downloaded", "skipped"))
+    print(f"本轮处理 {len(done)} 部，成功 {ok}")
+    return 0
+
+
+def cmd_rank(args, cfg, scraper):
+    from .rank import build
+    build(cfg, urls=args.from_urls or (), from_file=args.from_file or "",
+          cookie=args.cookie or "", site=args.site or "",
+          limit=args.limit or 0, dry_run=args.dry_run)
+    return 0
+
+
 def _summary(results):
     if not results:
         return
@@ -136,6 +163,31 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("doctor", help="环境体检")
     p.set_defaults(func=cmd_doctor)
+
+    # ── 网页自助下单 ──────────────────────────────────────────────
+    p = sub.add_parser("serve", help="起网页（候选池 → 勾选 → 提交）")
+    p.add_argument("--host", default=None)
+    p.add_argument("--port", type=int, default=None)
+    p.add_argument("--site", default="", help="自定义静态页目录（默认用内置页）")
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("worker", help="消费队列，自动下载")
+    p.add_argument("--once", action="store_true", help="只处理一个就退出（适合 crontab）")
+    p.add_argument("--max-items", type=int, default=0)
+    p.add_argument("--interval", type=float, default=5.0)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_worker)
+
+    p = sub.add_parser("rank", help="构建候选池（抓榜单页 或 手填清单）")
+    p.add_argument("--from", dest="from_urls", action="append", metavar="URL",
+                   help="榜单/列表页地址，可重复")
+    p.add_argument("--from-file", default="", help="番号清单文件（一行一个）")
+    p.add_argument("--cookie", default="", help="站点 Cookie（Cloudflare 站点需要）")
+    p.add_argument("--site", default="", help="来源标签")
+    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_rank)
 
     args = ap.parse_args(argv)
     cfg = load_config(args.config)

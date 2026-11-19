@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>javmeta · 自助下单</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --line:#262b36; --fg:#e6e8ee; --muted:#8b93a7;
+    --accent:#4f8cff; --ok:#2ecc71; --warn:#f1c40f; --err:#e74c3c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+       padding:0 0 96px}
+  header{position:sticky;top:0;z-index:9;background:rgba(15,17,21,.92);
+         backdrop-filter:blur(8px);border-bottom:1px solid var(--line);
+         padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:600}
+  .stat{color:var(--muted);font-size:13px}
+  .stat b{color:var(--fg);font-weight:600}
+  .grow{flex:1}
+  input[type=search]{background:var(--card);border:1px solid var(--line);border-radius:8px;
+        color:var(--fg);padding:7px 10px;font-size:14px;width:180px}
+  /* 网格：手机上两列，桌面上按宽度自动铺 */
+  #grid{display:grid;gap:12px;padding:14px 16px;
+        grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+  .card{position:relative;background:var(--card);border:1px solid var(--line);
+        border-radius:10px;overflow:hidden;cursor:pointer;transition:.15s}
+  .card:hover{border-color:#3a4260}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+  .card img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:#0b0d11}
+  .card .ph{width:100%;aspect-ratio:16/10;display:flex;align-items:center;justify-content:center;
+            color:#40465a;font-size:12px;background:#0b0d11}
+  .card .meta{padding:8px 9px 10px}
+  .card .code{font-weight:600;font-size:13.5px;letter-spacing:.2px}
+  .card .t{color:var(--muted);font-size:12px;margin-top:2px;height:2.9em;overflow:hidden}
+  .tick{position:absolute;top:8px;left:8px;width:22px;height:22px;border-radius:6px;
+        border:1px solid #4a5164;background:rgba(9,11,15,.75);display:flex;
+        align-items:center;justify-content:center;font-size:13px;color:transparent}
+  .card.sel .tick{background:var(--accent);border-color:var(--accent);color:#fff}
+  .tag{position:absolute;top:8px;right:8px;font-size:11px;padding:2px 6px;border-radius:999px;
+       background:rgba(9,11,15,.82);border:1px solid var(--line);color:var(--muted)}
+  .tag.ok{color:var(--ok);border-color:#20492f}
+  .tag.dl{color:var(--warn);border-color:#4a3d10}
+  .tag.err{color:var(--err);border-color:#4a2020}
+  /* 底部提交条 */
+  #bar{position:fixed;left:0;right:0;bottom:0;z-index:10;display:flex;align-items:center;gap:14px;
+       padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+       background:rgba(15,17,21,.95);border-top:1px solid var(--line);backdrop-filter:blur(8px)}
+  #bar .msg{color:var(--muted);font-size:13px;flex:1}
+  button{background:var(--accent);color:#fff;border:0;border-radius:9px;
+         padding:11px 20px;font-size:15px;font-weight:600;cursor:pointer}
+  button:disabled{background:#2b3242;color:#6f7891;cursor:not-allowed}
+  #empty{color:var(--muted);text-align:center;padding:60px 20px;line-height:1.9}
+  #empty code{color:var(--fg);background:var(--card);padding:2px 6px;border-radius:5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>自助下单</h1>
+  <span class="stat" id="stat">读取中…</span>
+  <span class="grow"></span>
+  <input type="search" id="q" placeholder="筛选番号/标题">
+</header>
+
+<div id="grid"></div>
+<div id="empty" hidden></div>
+
+<div id="bar">
+  <span class="msg" id="msg">勾选想要的，提交后自动下载</span>
+  <button id="send" disabled>提交</button>
+</div>
+
+<script>
+const grid = document.getElementById('grid');
+const emptyBox = document.getElementById('empty');
+const statEl = document.getElementById('stat');
+const msgEl = document.getElementById('msg');
+const btn = document.getElementById('send');
+const qEl = document.getElementById('q');
+
+let items = [], picked = new Set(), qfilter = '', flashUntil = 0;
+
+const TAG = {
+  done:      ['ok', '已入库'],
+  downloading:['dl', '下载中'],
+  pending:   ['dl', '排队中'],
+  failed:    ['err', '失败'],
+};
+
+function badge(it){
+  if (it.in_library) return TAG.done;
+  if (it.queue_status && TAG[it.queue_status]) return TAG[it.queue_status];
+  return null;
+}
+
+function render(){
+  grid.innerHTML = '';
+  const kw = qfilter.trim().toUpperCase();
+  const shown = items.filter(it => !kw ||
+      it.code.includes(kw) || (it.title||'').toUpperCase().includes(kw));
+
+  if (!items.length){
+    emptyBox.hidden = false;
+    emptyBox.innerHTML = '候选池是空的。<br>先跑一次 <code>javpipe rank --from &lt;榜单页&gt;</code>' +
+      '<br>或 <code>javpipe rank --from-file codes.txt</code> 手填清单，<br>再刷新这一页。';
+    return;
+  }
+  emptyBox.hidden = shown.length > 0;
+
+  for (const it of shown){
+    const b = badge(it);
+    const card = document.createElement('div');
+    card.className = 'card' + (picked.has(it.code) ? ' sel' : '');
+    const cover = it.cover
+      ? `<img loading="lazy" src="${it.cover}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'无封面'}))">`
+      : `<div class="ph">无封面</div>`;
+    card.innerHTML = `
+      ${cover}
+      <div class="tick">✓</div>
+      ${b ? `<span class="tag ${b[0]}">${b[1]}</span>` : ''}
+      <div class="meta">
+        <div class="code">${it.code}</div>
+        <div class="t">${(it.title||'').slice(0,60)}</div>
+      </div>`;
+    card.onclick = () => {
+      if (it.in_library) { flash(`${it.code} 已经在库里了`); return; }
+      if (picked.has(it.code)) picked.delete(it.code); else picked.add(it.code);
+      card.classList.toggle('sel', picked.has(it.code));
+      syncBar();
+    };
+    grid.appendChild(card);
+  }
+  syncBar();
+}
+
+function syncBar(){
+  btn.disabled = picked.size === 0;
+  btn.textContent = picked.size ? `提交 ${picked.size} 部` : '提交';
+  // 提交成功/失败的提示保留 6 秒，别被下一次刷新立刻覆盖
+  if (!picked.size && Date.now() > flashUntil) msgEl.textContent = '勾选想要的，提交后自动下载';
+}
+
+function flash(t){
+  msgEl.textContent = t;
+  flashUntil = Date.now() + 6000;
+}
+
+btn.onclick = async () => {
+  const list = [...picked];
+  btn.disabled = true; msgEl.textContent = '提交中…';
+  try {
+    const r = await fetch('/api/queue', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({items: list.map(code => ({code}))})
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    flash(`已收单 ${j.accepted} 部` + (j.skipped ? `（${j.skipped} 部已在队列/已下过，跳过）` : '') +
+          '　worker 会自动开下');
+    picked.clear();
+    await load();
+  } catch (e) {
+    flash('提交失败：' + e.message);
+    btn.disabled = false;
+  }
+};
+
+qEl.oninput = () => { qfilter = qEl.value; render(); };
+
+async function load(){
+  try {
+    const [l, s] = await Promise.all([
+      fetch('/api/list').then(r => r.json()),
+      fetch('/api/state').then(r => r.json()),
+    ]);
+    items = (l.items || []).map(it => {
+      const st = (s.items || {})[it.code];
+      return {...it, queue_status: it.queue_status || (st && st.status) || ''};
+    });
+    const c = s.counts || {};
+    const unsel = items.filter(i => !i.in_library).length;
+    statEl.innerHTML = `候选 <b>${items.length}</b> · 未入库 <b>${unsel}</b> · ` +
+      `排队 <b>${c.pending||0}</b> · 下载中 <b>${c.downloading||0}</b> · 完成 <b>${c.done||0}</b>`;
+    render();
+  } catch (e) {
+    statEl.textContent = '接口读取失败：' + e.message;
+  }
+}
+
+load();
+setInterval(load, 15000);   // 15 秒刷一次状态，勾选不会丢
+</script>
+</body>
+</html>

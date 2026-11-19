@@ -48,13 +48,14 @@ Jellyfin 直接认得的结构。
 | **分段种子保护** | 多个 >1GB 视频视为同一部片的分段，全保留并命名 `-partN` |
 | **广告清理** | <50MB 的"视频"和推广文件自动删，正片不碰 |
 | **Jellyfin 原生** | 目录名 = 番号，`<CODE>.nfo` + `poster` + `fanart`，抓不到也不影响播放 |
+| **网页自助下单** | 一个端口起个网页：候选池铺成封面墙，勾想要的、点提交，后台自动开下——像自助购物，不用记番号 | 
 | **零机器绑定** | 路径、代理、密码全走配置/环境变量，代码里没有任何写死的本机路径 |
 
 ## 安装
 
 ```bash
-git clone https://github.com/yadonl/javpipe.git
-cd javpipe
+git clone https://github.com/yadonl/javmeta.git
+cd javmeta
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
 ```
@@ -147,6 +148,62 @@ javpipe status
   完成 8.01GB，耗时 143s
 
 ===== 汇总 1/1 成功 =====
+```
+
+## 网页自助下单（推荐 → 勾选 → 提交 → 自动下载）
+
+命令行适合"我知道我要哪部"，但大多数时候人是想**翻一翻、挑一挑**。
+这一套就三步，起一个端口，剩下的交给后台：
+
+```bash
+# 1) 建候选池：抓几个榜单/列表页（抓不到就手填清单，一行一个番号）
+javpipe rank --from https://your-site.example/new-release/ --limit 60
+javpipe rank --from-file my_codes.txt          # 不联网，纯手填
+
+# 2) 起网页（默认 0.0.0.0:8892）
+javpipe serve --port 8892
+
+# 3) 起消费者：勾完提交，worker 自动下载 + 刮削 + 入库
+javpipe worker                                   # 常驻
+# 或者交给 crontab，队列空了自己退出、不占资源：
+# */5 * * * * cd /path/to/javmeta && .venv/bin/javpipe worker --once
+```
+
+打开 `http://<NAS_IP>:8892` 就是一堵封面墙：每张卡片带番号、标题、以及
+**已入库 / 排队中 / 下载中 / 失败** 的角标，已入库的点了会提示"已经在库里了"、不会重复下单。
+勾几部 → 底部「提交 N 部」→ 队列收单 → worker 依次下载。
+
+体感是"量贩"：**看得到、点得到、不用记番号、不用等一个命令跑完**。
+
+页面只做三件事——**看、勾、提交**，和下载彻底解耦：
+
+```
+浏览器 ──POST /api/queue──▶  queue.jsonl  ◀──取活──  worker ──▶  下载/刮削/入库
+   ▲                                                              │
+   └────────── GET /api/list · /api/state ◀── 状态回写 ────────────┘
+```
+
+- 网页挂了不影响下载；worker 停了网页照样能收单。
+- 队列就是一行一条 JSON 的文本文件（`~/.javpipe/queue.jsonl`），`flock` 加锁，多进程安全；
+  想看、想手改、想塞自定义脚本都行。
+- 接口就三个，自己写页面也行：
+
+| 接口 | 作用 |
+|:--|:--|
+| `GET /api/list` | 候选池 + 每部是否已入库/在队列里 |
+| `GET /api/state` | 队列计数 + 每部状态 |
+| `POST /api/queue` | `{"items":[{"code":"SONE-682"}]}` → `{"accepted":1}` |
+
+**关于榜单源**：MissAV / Jable 这类站点大多套着 Cloudflare，服务器直连会被 403。
+这不是本项目的 bug，抓不到就用两条退路：`--cookie "cf_clearance=..."` 带上浏览器里的 Cookie，
+或者干脆 `--from-file` 手填（配合任何你喜欢的工具导出清单）。**抓不到就报错退出，绝不编数据。**
+
+放到内网也建议在配置里设个 `web.token`，提交要带 `?token=xxx`：
+
+```yaml
+web:
+  port: 8892
+  token: "换成你自己的随机串"
 ```
 
 ## 它是怎么工作的
@@ -289,6 +346,10 @@ finds a source, downloads it, scrapes metadata, and files it into a Jellyfin-rea
 - Proxy hygiene: the download proxy is stripped from every local/NAS CLI call
   (`no_proxy=…,<NAS_IP>,192.168.0.0/16`); routing local traffic through the proxy cuts large
   transfers off at the tail.
+- **Self-service web shelf**: `javpipe rank` builds a candidate wall, `javpipe serve` puts it on a
+  port, you tick what you want and hit submit, `javpipe worker` downloads it in the background.
+  The page only reads/lists/submits; the queue is a plain JSONL file, so the UI and the downloader
+  can fail independently.
 - Everything machine-specific (paths, proxy, passwords) lives in `config.yaml` / env vars.
 
 ```bash

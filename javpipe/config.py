@@ -74,6 +74,19 @@ DEFAULTS: dict[str, Any] = {
         # 小于这个体积的“视频”当广告删掉
         "ad_max_bytes": 52428800,
     },
+
+    # 网页自助下单（javpipe serve / worker）
+    "web": {
+        "host": "0.0.0.0",
+        "port": 8892,
+        # 想换成自己的静态页就填目录，留空用内置页
+        "site_dir": "",
+        # 候选池与队列文件（网页读这个、worker 消费这个）
+        "candidates": "~/.javpipe/candidates.json",
+        "queue_file": "~/.javpipe/queue.jsonl",
+        # 非空则提交订单要带 ?token=xxx（放到内网也建议设一个）
+        "token": "",
+    },
 }
 
 
@@ -105,6 +118,10 @@ ENV_MAP = {
     "JAVPIPE_QB_USER": ("qbittorrent", "username"),
     "JAVPIPE_QB_PASSWORD": ("qbittorrent", "password"),
     "JAVPIPE_BITMAGNET": ("sources", "bitmagnet"),
+    "JAVPIPE_WEB_PORT": ("web", "port"),
+    "JAVPIPE_WEB_TOKEN": ("web", "token"),
+    "JAVPIPE_WEB_CANDIDATES": ("web", "candidates"),
+    "JAVPIPE_WEB_QUEUE": ("web", "queue_file"),
 }
 
 
