@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 from .downloaders import VIDEO_EXT, find_videos
@@ -16,19 +17,46 @@ from .downloaders import VIDEO_EXT, find_videos
 LEDGER_NAME = ".javpipe-processed.json"
 
 
+# ── 分辨率探测 ────────────────────────────────────────────────────────
+def probe_height(path: str) -> int:
+    """真实视频高度；失败返回 0（不猜）。"""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60).stdout
+        for line in out.splitlines():
+            line = line.strip().rstrip(",")
+            if line.isdigit():
+                return int(line)
+    except Exception:
+        pass
+    return 0
+
+
 # ── 分档 ──────────────────────────────────────────────────────────────
-def classify(cfg: dict, code: str, *, filename: str = "", meta: dict | None = None) -> str:
-    """按规则决定落哪个子目录（返回相对 library_root 的路径）。"""
+def classify(cfg: dict, code: str, *, filename: str = "", meta: dict | None = None,
+             height: int = 0) -> str:
+    """按规则决定落哪个子目录（返回相对 library_root 的路径）。
+
+    4K 类规则不看标题文字，只看真实分辨率 —— 站点标题常常带 "4K" 字样而片子是 720p，
+    按文字匹配会把一堆 1080p 塞进 4K 目录。
+    """
     hay = " ".join([code or "", filename or "",
                     " ".join((meta or {}).get("genres") or []),
                     (meta or {}).get("title", "")]).upper()
     for rule in cfg["library"].get("rules") or []:
+        d = rule["dir"]
         pats = rule.get("match") or []
+        if "4K" in d.upper() or "2160" in d.upper():
+            if height >= 2000:
+                return d
+            continue                      # 没到 2K 就跳过这条规则
         for p in pats:
             if p == "*":
-                return rule["dir"]
+                return d
             if p.upper() in hay:
-                return rule["dir"]
+                return d
     return "有码/无字幕"
 
 
@@ -195,7 +223,8 @@ def ingest(cfg: dict, folder: str, code: str, *, meta: dict | None = None,
     if not main_name:
         return "novideo", str(folder_p)
 
-    category = classify(cfg, code, filename=main_name, meta=meta)
+    height = probe_height(str(folder_p / main_name))
+    category = classify(cfg, code, filename=main_name, meta=meta, height=height)
     target = Path(cfg["library_root"]) / category / code
     if dry_run:
         return "dry", str(target)

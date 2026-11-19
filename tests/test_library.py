@@ -13,7 +13,7 @@ from javpipe.cli import code_from_url, normalize_code          # noqa: E402
 from javpipe.config import DEFAULTS, load_config                # noqa: E402
 from javpipe.library import (already_have, classify, clean_folder,  # noqa: E402
                              code_from_name, library_index, load_ledger,
-                             mark_processed, video_name)
+                             mark_processed, probe_height, video_name)
 from javpipe.sources import code_matches, norm, unpack_js_eval   # noqa: E402
 
 
@@ -50,14 +50,20 @@ def test_code_matches():
 
 
 # ── 分类与命名 ────────────────────────────────────────────────────────
-@pytest.mark.parametrize("code,filename,expected", [
-    ("ABC-123-U", "ABC-123-U.mp4", "无码"),
-    ("ABC-123-C", "ABC-123-C.mp4", "有码/有字幕"),
-    ("ABC-123", "ABC-123-4K.mp4", "有码/4K"),
-    ("ABC-123", "ABC-123.mp4", "有码/无字幕"),
+@pytest.mark.parametrize("code,filename,height,expected", [
+    ("ABC-123-U", "ABC-123-U.mp4", 1080, "无码"),
+    ("ABC-123-C", "ABC-123-C.mp4", 1080, "有码/有字幕"),
+    ("ABC-123", "ABC-123-4K.mp4", 2160, "有码/4K"),
+    ("ABC-123", "ABC-123.mp4", 1080, "有码/无字幕"),
+    # 标题带 4K 但实际 720p —— 不许进 4K 目录
+    ("ABC-124", "ABC-124-4K.mp4", 720, "有码/无字幕"),
 ])
-def test_classify(cfg, code, filename, expected):
-    assert classify(cfg, code, filename=filename) == expected
+def test_classify(cfg, code, filename, height, expected):
+    assert classify(cfg, code, filename=filename, height=height) == expected
+
+
+def test_probe_height(tmp_path):
+    assert probe_height(str(tmp_path / "nope.mp4")) == 0
 
 
 def test_video_name(cfg):
