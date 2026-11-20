@@ -15,8 +15,9 @@ import time
 from pathlib import Path
 
 from .downloaders import QBittorrent, find_videos, hls_download
-from .library import (already_have, classify, clean_folder, ingest, mark_failed,
-                      mark_processed)
+from .library import (already_have, bump_failed_try, classify, clean_folder,
+                      failed_tries, ingest, mark_failed, mark_processed,
+                      reset_failed_tries)
 from .scrapers import save_cover, scrape_meta, write_nfo
 from .sources import bitmagnet_pick, site_detail, site_search
 
@@ -80,15 +81,20 @@ def _download_magnet(cfg: dict, scraper, code: str, pick: dict, dl_root: Path, t
         min_bps=int(dcfg.get("min_kbps", 200)) * 1024,
         poll=int(dcfg.get("poll_interval", 20)))
     if state == "done":
-        main, deleted = clean_folder(cfg, str(dl_root), code)
+        main, deleted = clean_folder(cfg, str(dl_root), code, log=log)
         log(f"  磁力完成 → {main or '(无视频)'}，耗时 {time.time()-t0:.0f}s")
         vids = find_videos(str(dl_root))
         return {"code": code, "status": "downloaded", "source": "magnet",
                 "folder": str(dl_root), "files": len(vids),
                 "bytes": sum(sz for _f, sz in vids)}
-    # 停滞/超时：清掉半成品，别占空间
-    qb.delete(pick["infoHash"], delete_files=True)
-    shutil.rmtree(dl_root, ignore_errors=True)
+    # 停滞/超时：过半的残片留着（重投同一种能从断点续），没起步的才清掉
+    prog = float((info or {}).get("progress") or 0)
+    keep = prog >= 0.5
+    qb.delete(pick["infoHash"], delete_files=not keep)
+    if keep:
+        log(f"  残留 {prog * 100:.0f}% 保留在 {dl_root}（重投同一种可续传）")
+    else:
+        shutil.rmtree(dl_root, ignore_errors=True)
     raise RuntimeError(f"磁力{state}（{int((info or {}).get('dlspeed', 0)/1024)}KB/s）")
 
 
@@ -103,7 +109,8 @@ def _download_stream(cfg: dict, scraper, code: str, hit: dict, dl_root: Path, t0
                  retries=int(cfg["download"].get("segment_retries", 5)),
                  log=log)
     # 顺手把元数据落成 NFO（省一次抓取）
-    poster, fanart = save_cover(scraper, detail.get("cover", ""), str(dl_root), code, cfg)
+    poster, fanart = save_cover(scraper, detail.get("cover", ""), str(dl_root), code, cfg,
+                                fanart_urls=detail.get("fanarts"))
     meta = {"title": detail.get("title", ""), "date": detail.get("date", ""),
             "runtime": 0, "genres": detail.get("genres", []),
             "actresses": detail.get("actresses", []), "studio": ""}
@@ -115,6 +122,20 @@ def _download_stream(cfg: dict, scraper, code: str, hit: dict, dl_root: Path, t0
 
 
 # ── 批量：刮削 + 入库 ─────────────────────────────────────────────────
+def _looks_busy(path: str, *, fresh: float = 2 * 3600) -> bool:
+    """还在写的文件：qB 的 .!qB、aria2 的 .part、ffmpeg 合成中的 .part.mp4、分片 .tmp。
+
+    只认 `fresh` 秒内动过的 —— 崩掉留下的旧临时文件不能把整个目录永久判成「下载中」。
+    """
+    lf = path.lower()
+    if not (lf.endswith((".!qb", ".part", ".tmp")) or ".part." in lf):
+        return False
+    try:
+        return time.time() - os.path.getmtime(path) < fresh
+    except OSError:
+        return False
+
+
 def scrape_folder(cfg: dict, scraper, folder: Path, *, dry_run: bool = False,
                   move_failed: bool = True) -> dict:
     name = folder.name
@@ -127,7 +148,11 @@ def scrape_folder(cfg: dict, scraper, folder: Path, *, dry_run: bool = False,
             fail = Path(cfg["failed_root"]) / _safe_dir(code)
             fail.parent.mkdir(parents=True, exist_ok=True)
             if fail.exists():
-                shutil.rmtree(fail, ignore_errors=True)
+                # 绝不 rmtree：旧的那份可能比新的更完整。挪进 .archive 留着（不进 rescue 扫描）
+                arch = fail.parent / ".archive" / f"{_safe_dir(code)}-{int(time.time())}"
+                arch.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(fail), str(arch))
+                log(f"  ⚠️ 失败区已有同名目录，旧的一份挪到 {arch}")
             shutil.move(str(folder), str(fail))
             mark_failed(cfg, code)
             log(f"  → 已移入失败区 {fail}")
@@ -137,14 +162,15 @@ def scrape_folder(cfg: dict, scraper, folder: Path, *, dry_run: bool = False,
     if dry_run:
         return {"code": code, "status": "dry", "meta": meta}
 
-    main, deleted = clean_folder(cfg, str(folder), code)
+    main, deleted = clean_folder(cfg, str(folder), code, log=log)
     if deleted:
         log(f"  清理无用文件 {deleted} 个")
     if not main:
         log("  目录里没有可用视频")
         return {"code": code, "status": "novideo"}
 
-    poster, fanart = save_cover(scraper, meta.get("cover", ""), str(folder), code, cfg)
+    poster, fanart = save_cover(scraper, meta.get("cover", ""), str(folder), code, cfg,
+                                fanart_urls=meta.get("fanarts"))
     write_nfo(str(folder), code, meta, poster=poster, fanart=fanart)
 
     state, target = ingest(cfg, str(folder), code, meta=meta, log=log)
@@ -161,8 +187,8 @@ def scan_downloads(cfg: dict, scraper, *, dry_run: bool = False) -> list[dict]:
     for d in sorted(root.iterdir()):
         if not d.is_dir() or d.name.startswith("."):
             continue
-        # 还在下（qB 的 .!qB 或 aria2 的 .part）就跳过
-        busy = any(f.endswith((".!qB", ".part")) for _r, _ds, fs in os.walk(d) for f in fs)
+        # 还在下（qB 的 .!qB、aria2 的 .part、HLS 合成中的 .part.mp4 / 分片 .tmp）就跳过
+        busy = any(_looks_busy(os.path.join(_r, f)) for _r, _ds, fs in os.walk(d) for f in fs)
         if busy:
             log(f"[{d.name}] 下载中，跳过")
             continue
@@ -172,15 +198,31 @@ def scan_downloads(cfg: dict, scraper, *, dry_run: bool = False) -> list[dict]:
     return out
 
 
-def scan_failed(cfg: dict, scraper, *, dry_run: bool = False) -> list[dict]:
+def scan_failed(cfg: dict, scraper, *, dry_run: bool = False,
+                reset_tries: bool = False) -> list[dict]:
+    """重试失败区。同一部试够 `scraper.rescue_max_tries` 次还没元数据就跳过（默认 3，0=不限），
+    免得每轮都去骚扰站点；`javpipe rescue --force` 清计数后再试。"""
     root = Path(cfg["failed_root"])
     if not root.exists():
         return []
+    max_tries = int((cfg.get("scraper") or {}).get("rescue_max_tries", 3) or 0)
+    if reset_tries and not dry_run:
+        reset_failed_tries(cfg)
+        log("已清空 rescue 计数，这一轮全部重试")
     out = []
     for d in sorted(root.iterdir()):
         if not d.is_dir() or d.name.startswith("."):
             continue
-        out.append(scrape_folder(cfg, scraper, d, dry_run=dry_run, move_failed=False))
+        code = d.name.upper()
+        if max_tries and not dry_run:
+            n = failed_tries(cfg, code)
+            if n >= max_tries:
+                log(f"[{code}] 已试 {n} 次仍没元数据，跳过（想再试：javpipe rescue --force）")
+                continue
+        r = scrape_folder(cfg, scraper, d, dry_run=dry_run, move_failed=False)
+        if not dry_run and r.get("status") == "nometa":
+            r["tries"] = bump_failed_try(cfg, code)
+        out.append(r)
     return out
 
 

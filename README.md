@@ -40,14 +40,14 @@ Jellyfin 直接认得的结构。
 
 | 能力 | 说明 |
 |:--|:--|
-| **双下载通道** | qBittorrent 磁力（含停滞自动放弃）+ HLS 分片并发下载（断点续传、ffmpeg 合成） |
+| **双下载通道** | qBittorrent 磁力（含停滞自动放弃、过半残片留种续传）+ HLS 分片并发下载（分片原子落盘、可续传、ffmpeg 合成） |
 | **多源兜底** | 磁力 → MissAV → Jable，逐级降级，不会因为一个站点挂了就断链 |
 | **刮削兜底** | JavBus 优先；缺页时用 MissAV/Jable 的 `og:title`、发行日期、女优、分类生成 NFO |
 | **四级去重** | 台账 → 媒体库 → 失败区 → 下载区，任何一处有完整片子就不重下 |
-| **失败救援** | 刮削不过的片子进隔离区（不删！），`javpipe rescue` 反复尝试补元数据，3 次不过自动闭嘴 |
+| **失败救援** | 刮削不过的片子进隔离区（不删！），`javpipe rescue` 补元数据，3 次不过自动闭嘴（`--force` 再试） |
 | **分段种子保护** | 多个 >1GB 视频视为同一部片的分段，全保留并命名 `-partN` |
-| **广告清理** | <50MB 的"视频"和推广文件自动删，正片不碰 |
-| **Jellyfin 原生** | 目录名 = 番号，`<CODE>.nfo` + `poster` + `fanart`，抓不到也不影响播放 |
+| **广告清理** | <50MB 的"视频"自动删；其它多余视频**一个都不删**，挪进 `.extras/` 等人看 |
+| **Jellyfin 原生** | 目录名 = 番号，`<CODE>.nfo` + `poster` + 剧照 `fanart`（剧照取不到才复用封面） |
 | **网页自助下单** | 一个端口起个网页：候选池铺成封面墙，勾想要的、点提交，后台自动开下——像自助购物，不用记番号 | 
 | **零机器绑定** | 路径、代理、密码全走配置/环境变量，代码里没有任何写死的本机路径 |
 
@@ -160,7 +160,7 @@ javpipe status
 javpipe rank --from https://your-site.example/new-release/ --limit 60
 javpipe rank --from-file my_codes.txt          # 不联网，纯手填
 
-# 2) 起网页（默认 0.0.0.0:8892）
+# 2) 起网页（默认只监听 127.0.0.1:8892；要给局域网用先设 web.token，见下）
 javpipe serve --port 8892
 
 # 3) 起消费者：勾完提交，worker 自动下载 + 刮削 + 入库
@@ -198,13 +198,18 @@ javpipe worker                                   # 常驻
 这不是本项目的 bug，抓不到就用两条退路：`--cookie "cf_clearance=..."` 带上浏览器里的 Cookie，
 或者干脆 `--from-file` 手填（配合任何你喜欢的工具导出清单）。**抓不到就报错退出，绝不编数据。**
 
-放到内网也建议在配置里设个 `web.token`，提交要带 `?token=xxx`：
+要让局域网里的手机也能下单，就把监听地址打开并**一定配个 token**——
+`web.host` 不是本机地址又没设 `web.token` 时，`javpipe serve` 会直接拒绝启动（谁能扫到这个
+端口谁就能往你 NAS 下单）：
 
 ```yaml
 web:
+  host: 0.0.0.0        # 只给自己机器用就别改，默认 127.0.0.1
   port: 8892
   token: "换成你自己的随机串"
 ```
+
+设了 token 之后打开 `http://<NAS_IP>:8892/?token=你的token` —— 页面会把 token 自动带在提交请求里。
 
 ## 它是怎么工作的
 
@@ -221,16 +226,20 @@ web:
 ### 2. 下载（`downloaders.py`）
 
 - **磁力**：投种 → 轮询 → 连续 `stall_window` 秒低于 `min_kbps` 就判定停滞。
-  停滞会把种子和半成品**一起删掉**（不占空间），然后转流媒体
-- **流媒体**：master playlist 里挑码率最高的一路 → 分片并发下载（默认 8 并发，支持断点续传）
-  → `ffmpeg -f concat -c copy` 合成 mp4 → `+faststart` 让 Jellyfin 能秒开拖动
+  停滞时下了一半以上的残片**留着**（重新投同一种能从断点续），没起步的才清掉，然后转流媒体。
+  完成判定按 qB 的状态名 + 实际 progress 双重核对（qB 5.x 把 `pausedUP` 改名叫 `stoppedUP`，
+  只认老名字会把下完的种子当停滞删掉）
+- **流媒体**：master playlist 里挑码率最高的一路 → 分片并发下载（默认 8 并发）
+  → 每个分片先写 `.tmp` 再原子改名（被 kill 只会留下 `.tmp`，不会留下"看着完成其实截断"的坏片；
+  重跑跳过已完成分片）→ `ffmpeg -f concat -c copy` 合成 mp4 → `+faststart` 让 Jellyfin 能秒开拖动
 
 ### 3. 刮削（`scrapers.py`）
 
 - **JavBus** 优先：标题、发行日期、时长、片商、女优、分类、封面、剧照
 - **MissAV / Jable 兜底**：JavBus 报「您進入的網址有誤」或 404 时，从 `og:title`、
   `release_date`、`/actresses/`、`/genres/` 拼出等价元数据
-- 输出标准 `<CODE>.nfo` + `poster` + `fanart`，Jellyfin / Emby / Kodi 都能读
+- 输出标准 `<CODE>.nfo` + `poster` + `fanart`；fanart 用 JavBus 的剧照（真截图），
+  剧照拿不到才复用封面，Jellyfin / Emby / Kodi 都能读
 
 ### 4. 入库（`library.py`）
 
@@ -301,8 +310,10 @@ A：封面下载失败（图床抽风）不影响入库。跑 `javpipe rescue` �
 `<CODE>-poster.jpg` 进去。
 
 **Q：刮削失败的片子会丢吗？**
-A：不会。进 `<failed_root>/<番号>/`，片子完整，只是元数据没拿到。`javpipe rescue`
-会一直尝试，3 次不过写 `.skip` 标记不再骚扰站点。
+A：不会。进 `<failed_root>/<番号>/`，片子完整，只是元数据没拿到；失败区里已有同名目录时，
+旧的那份挪进 `<failed_root>/.archive/`，**不覆盖也不删**。`javpipe rescue` 每轮重试，
+同一部试满 3 次（`scraper.rescue_max_tries`）还没元数据就跳过，不再骚扰站点；
+想再试一轮跑 `javpipe rescue --force`（清计数）。
 
 **Q：明明入库了，为什么磁盘上还多留一份、库里甚至出现 `CODE_1.mp4`？**
 A：两个都要防的坑，根源都是「凭返回值下结论」：
@@ -319,6 +330,18 @@ A：下载代理（`http_proxy`）是**全进程环境变量**，你调用的本
 容器内的 qB API）都会继承它。让 NAS/本机流量绕一圈代理，大文件传输就会在尾部被切断。
 两个动作：给局域网点直连 —— `no_proxy=127.0.0.1,localhost,<NAS_IP>,192.168.0.0/16`；
 以及**调本机 CLI 前把代理变量整个剥掉**，只在真正出网的请求上带代理。
+
+## 已知边界（别指望它万无一失）
+
+- **qBittorrent**：4.x / 5.x 都认（5.x 改了状态名）。只在本机 qB 5.3 上实测过，别的版本请先 `javpipe doctor`。
+- **HLS 只做分片级校验**：分片原子落盘 + 空响应拒绝 + 大小阈值，但**不校验整片时长**
+  （ffmpeg 合成成功即算完成）。服务端返回"看似正常其实缺内容"的分片，本项目查不出来。
+- **下载器本身没测**（`downloaders.py` / `scrapers.py` 靠真站点跑）。测试是零外网纯函数 +
+  本地 HTTP server，覆盖的是解析、归档、去重、队列、落库对账这些逻辑。
+- **一个 worker 顺序下**，为的是不抢带宽。多个 worker 同时起也会互斥取活（`flock`），
+  但会同时下载多部。
+- **站点都是外部依赖**：Cloudflare 403、图床抽风、镜像换域名，这些项目兜不住，只能降级或跳过。
+- **Windows 未测**（`flock` 是 POSIX 的）。
 
 ## 免责声明
 

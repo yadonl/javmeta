@@ -27,6 +27,7 @@ download:
   segment_workers: 8                  # HLS 分片并发
   segment_retries: 5
   poll_interval: 20
+  claim_stale_seconds: 21600          # worker 被 kill 留下的 downloading 多久后自动放回队列
 
 scraper:
   javbus_mirrors:
@@ -34,6 +35,14 @@ scraper:
     - https://www.javseen.com
   fallback: [missav, jable]           # JavBus 缺页时用它们补元数据
   cover_timeout: 40
+  rescue_max_tries: 3                 # 失败区同一部试 3 次还没元数据就跳过（0=不限）
+
+web:
+  host: 127.0.0.1                     # 只给本机用就别改；改 0.0.0.0 必须同时设 token
+  port: 8892
+  token: ""                           # 非空则提交订单要带 ?token=xxx（页面会自动带）
+  # candidates: ~/.javpipe/candidates.json
+  # queue_file: ~/.javpipe/queue.jsonl
 
 library:
   # 从上往下匹配，命中即停；"*" 是默认兜底

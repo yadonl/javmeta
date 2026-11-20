@@ -7,6 +7,10 @@ build/
 dist/
 config.yaml
 .env
+.env.*
+!.env.example
+cookies.txt
+*.db
 .javpipe-processed.json
 *.log
 .pytest_cache/

@@ -194,19 +194,37 @@ def write_nfo(folder: str, code: str, meta: dict, *, poster: str = "",
     return path
 
 
-def save_cover(scraper, cover_url: str, folder: str, code: str, cfg: dict) -> tuple[str, str]:
-    """下载封面，写 <CODE>-poster.jpg 和 <CODE>-fanart-1.jpg，返回文件名对。"""
-    if not cover_url:
-        return "", ""
-    try:
-        r = scraper.get(cover_url, retries=2, timeout=cfg["scraper"].get("cover_timeout", 40))
-        if r.status_code != 200 or len(r.content) < 2000:
-            return "", ""
-    except Exception:
+def save_cover(scraper, cover_url: str, folder: str, code: str, cfg: dict,
+               *, fanart_urls=None) -> tuple[str, str]:
+    """下载封面，写 <CODE>-poster.jpg 和 <CODE>-fanart-1.jpg，返回文件名对。
+
+    fanart 优先用 JavBus 的剧照（真截图），拿不到才复用封面——只写封面两份是假的 fanart。
+    """
+    timeout = cfg["scraper"].get("cover_timeout", 40)
+
+    def _grab(url: str) -> bytes:
+        if not url:
+            return b""
+        try:
+            r = scraper.get(url, retries=2, timeout=timeout)
+            if r.status_code == 200 and len(r.content) >= 2000:
+                return r.content
+        except Exception:
+            pass
+        return b""
+
+    cover = _grab(cover_url)
+    if not cover:
         return "", ""
     poster = f"{code.upper()}-poster.jpg"
     fanart = f"{code.upper()}-fanart-1.jpg"
-    for name in (poster, fanart):
-        with open(os.path.join(folder, name), "wb") as f:
-            f.write(r.content)
+    shot = b""
+    for u in (fanart_urls or [])[:3]:       # 前几张剧照试到一张能下的就行
+        shot = _grab(u)
+        if shot:
+            break
+    with open(os.path.join(folder, poster), "wb") as f:
+        f.write(cover)
+    with open(os.path.join(folder, fanart), "wb") as f:
+        f.write(shot or cover)
     return poster, fanart

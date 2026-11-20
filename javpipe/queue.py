@@ -87,11 +87,47 @@ def set_status(cfg: dict, code: str, status: str, note: str = "", kind: str = "a
 
 
 def next_pending(cfg: dict) -> str | None:
-    """下一个待办；同一时间只放一个出去（顺序下载，不抢带宽）。"""
+    """看一眼下一个待办（只读，不占位）。真正取活请用 claim_next。"""
     for code, r in latest(cfg).items():
         if r.get("status") == "pending":
             return code
     return None
+
+
+def claim_next(cfg: dict, *, stale_after: float = 6 * 3600) -> str | None:
+    """取一个待办并**当场**置成 downloading，返回番号；队列空返回 None。
+
+    两件事必须在这一步做完，否则就是静默丢单：
+
+    1. 取活 + 置位要一次加锁做完。分开做的话，网页收单的 cron 和手动起的 worker
+       会同时拿到同一部（两边都以为自己是唯一）。
+    2. 已被 kill 的 worker 会留下 `downloading`，`next_pending` 再也不返回它 →
+       这一部永远卡死。超过 `stale_after` 秒没动静的算僵尸，自动放回 pending。
+    """
+    p = queue_path(cfg)
+    lock = p.with_suffix(".lock")
+    with open(lock, "a+", encoding="utf-8") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            cur = latest(cfg)
+            now = time.time()
+            for code, r in cur.items():
+                if r.get("status") != "downloading":
+                    continue
+                if now - float(r.get("ts") or 0) < stale_after:
+                    continue
+                row = {"ts": int(now), "type": r.get("type", "av"), "code": code,
+                       "status": "pending", "note": "超时回收（上次 worker 没回写）"}
+                _append(cfg, row)
+                cur[code] = row
+            for code, r in cur.items():
+                if r.get("status") == "pending":
+                    _append(cfg, {"ts": int(now), "type": r.get("type", "av"),
+                                  "code": code, "status": "downloading", "note": "claim"})
+                    return code
+            return None
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def counts(cfg: dict) -> dict[str, int]:

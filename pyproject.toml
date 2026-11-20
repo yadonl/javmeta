@@ -18,6 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 只在没装 curl_cffi 时兜底用的 HTTP 后端
+plainhttp = ["requests>=2.31"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

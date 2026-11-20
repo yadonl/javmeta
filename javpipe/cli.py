@@ -80,7 +80,7 @@ def cmd_scrape(args, cfg, scraper):
 
 
 def cmd_rescue(args, cfg, scraper):
-    res = scan_failed(cfg, scraper, dry_run=args.dry_run)
+    res = scan_failed(cfg, scraper, dry_run=args.dry_run, reset_tries=args.force)
     _summary(res)
     return 0
 
@@ -156,6 +156,8 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("rescue", help="扫失败区，补元数据后入库")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="清空 rescue 计数（试够 3 次被跳过的那些再试一轮）")
     p.set_defaults(func=cmd_rescue)
 
     p = sub.add_parser("status", help="库存概览")

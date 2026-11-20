@@ -1,6 +1,6 @@
 """网页自助下单：一个端口，一堆封面，勾完提交，剩下的自动下载。
 
-    javpipe serve                      # 0.0.0.0:8892，用内置页面
+    javpipe serve                      # 默认只监听 127.0.0.1:8892（要给局域网用先设 web.token）
     javpipe serve --port 9000 --site ./my_site   # 换端口 / 换成自己的静态页
 
 页面只做三件事：**看（候选池）、勾、提交**。真正的下载由 `javpipe worker` 干，
@@ -112,7 +112,13 @@ class Handler(SimpleHTTPRequestHandler):
 def serve(cfg: dict, *, host: str | None = None, port: int | None = None,
           site: str = "", log=print) -> None:
     web = cfg.get("web") or {}
-    host = host or web.get("host") or "0.0.0.0"
+    host = host or web.get("host") or "127.0.0.1"
+    # 绑 0.0.0.0 又不设 token = 谁扫到这个端口都能往你的 NAS 下单。宁可不启动。
+    local = host in ("127.0.0.1", "localhost", "::1")
+    if not local and not str(web.get("token") or "").strip():
+        raise SystemExit(
+            f"拒绝启动：web.host={host} 但 web.token 为空，等于对外开放下单接口。\n"
+            "二选一：把 web.host 改回 127.0.0.1（默认），或者设一个 web.token。")
     port = int(port or web.get("port") or 8892)
     site_dir = Path(site or web.get("site_dir") or BUILTIN_SITE).expanduser()
 

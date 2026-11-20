@@ -147,13 +147,18 @@ function flash(t){
   flashUntil = Date.now() + 6000;
 }
 
+// 配了 web.token 时：页面地址带 ?token=xxx，提交时自动带上（否则 403）
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+
 btn.onclick = async () => {
   const list = [...picked];
   btn.disabled = true; msgEl.textContent = '提交中…';
   try {
+    const headers = {'Content-Type': 'application/json'};
+    if (TOKEN) headers['X-Token'] = TOKEN;
     const r = await fetch('/api/queue', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers,
       body: JSON.stringify({items: list.map(code => ({code}))})
     });
     const j = await r.json();

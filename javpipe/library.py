@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from .downloaders import VIDEO_EXT, find_videos
@@ -100,14 +101,44 @@ def mark_failed(cfg: dict, code: str):
         save_ledger(cfg, d)
 
 
+# rescue 次数：失败区里同一部试过几次还没元数据，记在台账里，够数就别再骚扰站点
+def bump_failed_try(cfg: dict, code: str) -> int:
+    d = load_ledger(cfg)
+    tries = d.setdefault("failed_tries", {})
+    k = code.upper()
+    tries[k] = int(tries.get(k, 0)) + 1
+    save_ledger(cfg, d)
+    return tries[k]
+
+
+def failed_tries(cfg: dict, code: str) -> int:
+    return int((load_ledger(cfg).get("failed_tries") or {}).get(code.upper(), 0))
+
+
+def reset_failed_tries(cfg: dict, code: str | None = None):
+    d = load_ledger(cfg)
+    tries = d.get("failed_tries") or {}
+    if code is None:
+        tries.clear()
+    else:
+        tries.pop(code.upper(), None)
+    d["failed_tries"] = tries
+    save_ledger(cfg, d)
+
+
 # ── 去重 ──────────────────────────────────────────────────────────────
 def library_index(cfg: dict) -> dict[str, str]:
-    """扫库，返回 {番号: 相对路径}。目录名就是番号。"""
+    """扫库，返回 {番号: 相对路径}。目录名就是番号。
+
+    跳过点开头的目录（`.verify-fail` 隔离区、用户自己的隐藏目录）—— 否则隔离区里的
+    半成品会被当成「库内已有」，以后再也不重下。
+    """
     root = Path(cfg["library_root"])
     idx: dict[str, str] = {}
     if not root.exists():
         return idx
     for dirpath, dirnames, _files in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for dn in dirnames:
             rel = str(Path(dirpath, dn).relative_to(root))
             idx.setdefault(dn.upper(), rel)
@@ -152,8 +183,13 @@ def code_from_name(name: str) -> str:
     return m.group(1).upper().replace("_", "-") + (m.group(2) or "").upper()
 
 
-def clean_folder(cfg: dict, folder: str, code: str) -> tuple[str, int]:
-    """删广告、给视频统一命名。返回 (主视频文件名, 删掉的文件数)。"""
+def clean_folder(cfg: dict, folder: str, code: str, *, log=None) -> tuple[str, int]:
+    """删广告、给视频统一命名。返回 (主视频文件名, 删掉的文件数)。
+
+    只有 <`ad_max_bytes` 的广告才真删。其它视频一个都不删：既不是分段
+    （<`multipart_min_bytes`）又不止一个时，多余的那几个挪到
+    `<download_root>/.extras/` 隔离，让人自己看——静默删掉半个片子比占点空间糟糕得多。
+    """
     libcfg = cfg["library"]
     ad_max = int(libcfg.get("ad_max_bytes", 52428800))
     multi_min = int(libcfg.get("multipart_min_bytes", 1073741824))
@@ -194,12 +230,22 @@ def clean_folder(cfg: dict, folder: str, code: str) -> tuple[str, int]:
     ext = os.path.splitext(main_src)[1]
     target = folder_p / (video_name(cfg, code)[:-4] + ext if video_name(cfg, code).endswith(".mp4")
                          else video_name(cfg, code))
-    for f, _sz in vids[1:]:                 # 同目录其它大文件是杂项，删
-        try:
-            os.remove(f)
-            deleted += 1
-        except OSError:
-            pass
+    extras = [f for f, _sz in vids[1:]]      # 其它大文件：不删，挪去隔离区
+    if extras:
+        hold = Path(cfg.get("download_root") or ".") / ".extras" / f"{code.upper()}-{int(time.time())}"
+        moved = 0
+        for f in extras:
+            try:
+                hold.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.replace(f, hold / os.path.basename(f))
+                except OSError:
+                    shutil.move(f, str(hold / os.path.basename(f)))
+                moved += 1
+            except OSError:
+                pass
+        if log:
+            log(f"    另有 {moved} 个视频不是正片（≥{ad_max // 2**20}MB），没删，放在 {hold}")
     if Path(main_src) != target:
         try:
             os.replace(main_src, target)
@@ -217,7 +263,7 @@ def ingest(cfg: dict, folder: str, code: str, *, meta: dict | None = None,
     if not folder_p.is_dir():
         return "missing", str(folder_p)
 
-    main_name, deleted = clean_folder(cfg, folder, code)
+    main_name, deleted = clean_folder(cfg, folder, code, log=log)
     if deleted:
         log(f"    清理无用文件 {deleted} 个")
     if not main_name:
@@ -248,8 +294,17 @@ def ingest(cfg: dict, folder: str, code: str, *, meta: dict | None = None,
     after = {os.path.basename(f): sz for f, sz in find_videos(str(target))}
     bad = [(n, sz, after.get(n)) for n, sz in before.items() if after.get(n) != sz]
     if bad:
-        log(f"    ⚠️ 落库未通过校验 {bad[:3]}（已在 {target}，未记台账）")
-        return "verify-fail", str(target)
+        # 半拷贝绝不能留在 <分类>/<番号>：库内去重是按目录名算的，留在原位就会被
+        # 当成「已入库」，以后既不下也不再试。挪进 .verify-fail（不删、不进索引）。
+        quarantine = Path(cfg["library_root"]) / ".verify-fail" / f"{code}-{int(time.time())}"
+        try:
+            quarantine.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(target), str(quarantine))
+        except Exception as e:  # noqa: BLE001 —— 隔离失败也不能谎报成功
+            log(f"    ⚠️ 落库未通过校验 {bad[:3]}，且隔离失败（{e}）→ 仍在 {target}，未记台账")
+            return "verify-fail", str(target)
+        log(f"    ⚠️ 落库未通过校验 {bad[:3]}（已隔离到 {quarantine}，未记台账）")
+        return "verify-fail", str(quarantine)
     mark_processed(cfg, code)
     return "moved", str(target)
 
@@ -260,7 +315,7 @@ def status(cfg: dict) -> dict:
     if root.exists():
         try:
             for d in sorted(root.iterdir()):
-                if d.is_dir():
+                if d.is_dir() and not d.name.startswith("."):
                     try:
                         cats[d.name] = len([x for x in d.iterdir() if x.is_dir()])
                     except PermissionError:

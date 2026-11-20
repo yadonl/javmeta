@@ -15,6 +15,21 @@ from urllib.parse import urljoin
 
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".wmv", ".ts", ".m4v", ".mov")
 
+# qBittorrent 的「下完了」状态名。5.0 起把 pausedUP/pausedDL 改名成 stoppedUP/stoppedDL，
+# 5.x 还多了 moving（完成瞬间在搬文件）。这张表少一个，下完的种子就会被判成「停滞」，
+# 随后 delete_files=True 把片子连种一起删 —— 实测踩过，白丢 GB 级文件。
+DONE_STATES = ("pausedUP", "stoppedUP", "queuedUP", "uploading", "stalledUP",
+               "forcedUP", "moving")
+ERR_STATES = ("error", "missingFiles")
+# 还在动的状态：progress 显示 1 也不能当完成（校验/搬运完才算）
+ACTIVE_STATES = ("downloading", "metaDL", "forcedMetaDL", "allocating", "queuedDL",
+                 "stalledDL", "checkingDL", "checkingUP", "checkingResumeData")
+
+# HLS：一个合法 TS 分片至少 188 字节（一个 TS 包）；小于这个就是坏响应
+MIN_SEGMENT_BYTES = 188
+# 已有分片大于这个才认作「下好了」，重跑时跳过
+REUSE_SEGMENT_BYTES = 1024
+
 
 # ── qBittorrent Web API ───────────────────────────────────────────────
 class QBittorrent:
@@ -110,10 +125,15 @@ class QBittorrent:
                 return "error", {"error": "任务不在 qB 里（可能被删）"}
             last = info
             st = info.get("state", "")
-            if st in ("pausedUP", "queuedUP", "uploading", "stalledUP", "forcedUP"):
-                return "done", info
-            if st in ("error", "missingFiles"):
+            try:
+                progress = float(info.get("progress") or 0)
+            except (TypeError, ValueError):
+                progress = 0.0
+            if st in ERR_STATES:
                 return "error", info
+            # 完成判定：状态名命中，或者字节已经齐了（progress≈1 且不在动的状态）
+            if st in DONE_STATES or (progress >= 0.999 and st not in ACTIVE_STATES):
+                return "done", info
             speed = float(info.get("dlspeed") or 0)
             if speed < min_bps:
                 slow_since = slow_since or time.time()
@@ -221,10 +241,16 @@ def hls_download(scraper, m3u8_url: str, out_path: str, *, referer: str = "",
     def fetch(idx_seg):
         idx, url = idx_seg
         fp = cache / f"{idx:06d}.ts"
-        if fp.exists() and fp.stat().st_size > 1024:
+        tmp = cache / f"{idx:06d}.ts.tmp"
+        if not tmp.exists() and fp.exists() and fp.stat().st_size > REUSE_SEGMENT_BYTES:
             return fp
         data = _http_get(scraper, url, referer=referer, binary=True, retries=retries)
-        fp.write_bytes(data)
+        if not data or len(data) < MIN_SEGMENT_BYTES:
+            # 空体/错误页当分片写进去就是静默坏片，宁可重试
+            raise RuntimeError(f"分片 {idx} 只有 {len(data or b'')} 字节，当坏响应重下")
+        # 先写 .tmp 再原子改名：进程被 kill 只会留下 .tmp，不会留下「截断但看着像完成」的分片
+        tmp.write_bytes(data)
+        os.replace(tmp, fp)
         return fp
 
     done = 0
@@ -258,16 +284,25 @@ def hls_download(scraper, m3u8_url: str, out_path: str, *, referer: str = "",
 
 
 def find_videos(folder: str) -> list[tuple[str, int]]:
-    """目录（含一层子目录）里的视频文件，返回 [(路径, 字节数)]。"""
+    """目录里的视频文件，返回 [(路径, 字节数)]。
+
+    跳过：隐藏目录/文件、HLS 分片缓存 `*.segments/`（那是下载中间态，不是正片）、
+    qB 的 `.!qB` 未完成件、ffmpeg 正在合成的 `*.part.mp4`。
+    """
     out = []
-    for root, _dirs, files in os.walk(folder):
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not d.endswith(".segments")]
         for f in files:
-            if f.lower().endswith(VIDEO_EXT) and not f.endswith(".!qB"):
-                fp = os.path.join(root, f)
-                try:
-                    out.append((fp, os.path.getsize(fp)))
-                except OSError:
-                    pass
+            lf = f.lower()
+            if not lf.endswith(VIDEO_EXT) or lf.startswith("."):
+                continue
+            if lf.endswith(".!qb") or ".part" in lf:
+                continue
+            fp = os.path.join(root, f)
+            try:
+                out.append((fp, os.path.getsize(fp)))
+            except OSError:
+                pass
     return out
 
 

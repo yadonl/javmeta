@@ -22,11 +22,11 @@ HARD_FAIL = ("notfound", "nometa", "novideo")
 def run_once(cfg: dict, scraper, *, dry_run: bool = False, force: bool = False,
              scrape_after: bool = True) -> dict | None:
     """处理一个待办。返回结果 dict；队列空则返回 None。"""
-    code = queue.next_pending(cfg)
+    stale = float((cfg.get("download") or {}).get("claim_stale_seconds", 21600))
+    code = queue.claim_next(cfg, stale_after=stale)
     if not code:
         return None
 
-    queue.set_status(cfg, code, "downloading")
     log(f"=== 队列取到 {code} ===")
     try:
         r = fetch_one(cfg, scraper, code, dry_run=dry_run, force=force)

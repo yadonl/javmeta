@@ -37,7 +37,7 @@ class Scraper:
                                     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
             self._lib = "requests"
         else:  # pragma: no cover
-            raise RuntimeError("需要安装 curl_cffi 或 requests")
+            raise RuntimeError("需要 curl_cffi（推荐）或 requests 兜底：pip install 'javpipe[plainhttp]'")
 
     def get(self, url: str, *, retries: int = 3, backoff: float = 1.5, **kwargs: Any):
         kwargs.setdefault("timeout", self.timeout)

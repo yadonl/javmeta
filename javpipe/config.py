@@ -59,6 +59,8 @@ DEFAULTS: dict[str, Any] = {
         ],
         "fallback": ["missav", "jable"],
         "cover_timeout": 40,
+        # 失败区同一部试几次还没元数据就跳过（0=不限次）
+        "rescue_max_tries": 3,
     },
 
     "library": {
@@ -77,7 +79,8 @@ DEFAULTS: dict[str, Any] = {
 
     # 网页自助下单（javpipe serve / worker）
     "web": {
-        "host": "0.0.0.0",
+        # 只监听本机。要给局域网用就显式改成 0.0.0.0，**同时必须设 web.token**
+        "host": "127.0.0.1",
         "port": 8892,
         # 想换成自己的静态页就填目录，留空用内置页
         "site_dir": "",
